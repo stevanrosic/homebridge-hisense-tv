@@ -88,8 +88,8 @@ class HisenseTv:
     _VALID_SERVICES = {"platform_service", "remote_service", "ui_service"}
 
     _BASE_TOPIC = posixpath.join("/", "remoteapp", "mobile")
-    _BROADCAST_TOPIC = posixpath.join(_BASE_TOPIC, "broadcast", "#")
-
+    _BROADCAST_TOPIC = posixpath.join(_BASE_TOPIC, "broadcast", "ui_service", "state")
+    _BROADCAST_TOPIC_VOLUME = posixpath.join(_BASE_TOPIC, "broadcast", "platform_service", "actions", "volumechange")
     def __init__(
             self,
             hostname: str,
@@ -119,6 +119,8 @@ class HisenseTv:
         self._device_topic = f"{self._mac.upper()}$normal"
         self._our_topic = posixpath.join(self._BASE_TOPIC, self._device_topic, "#")
         self._queue = {self._BROADCAST_TOPIC: queue.Queue(), self._our_topic: queue.Queue()}
+        self._queue_volume = {self._BROADCAST_TOPIC_VOLUME: queue.Queue(), self._our_topic: queue.Queue()}
+
 
     def __enter__(self):
         self._mqtt_client = mqtt.Client(self.client_id)
@@ -167,6 +169,7 @@ class HisenseTv:
         self.logger.debug(f"subscribing to {self._our_topic} and {self._BROADCAST_TOPIC}")
         self._mqtt_client.subscribe(self._our_topic)
         self._mqtt_client.subscribe(self._BROADCAST_TOPIC)
+        self._mqtt_client.subscribe(self._BROADCAST_TOPIC_VOLUME)
         self.connected = True
 
     def _on_message(
@@ -199,12 +202,25 @@ class HisenseTv:
             queue_name = queue_key.replace("/#", "")
             if msg.topic.startswith(queue_name):
                 self._queue[queue_key].put_nowait(payload)
-
+                
+        for queue_key in self._queue_volume:
+            queue_name = queue_key.replace("/#", "")
+            if msg.topic.startswith(queue_name):
+                self._queue_volume[queue_key].put_nowait(payload)
 
     def _wait_for_response(self, topic) -> Optional[dict]:
         """ Waits for the first response from the TV. """
         try:
             return self._queue[topic].get(block=True, timeout=self.timeout)
+        except queue.Empty as e:
+            raise HisenseTvTimeoutError(
+                f"failed to recieve a response in {self.timeout:.3f}s"
+            ) from e
+            
+    def _wait_for_response_vol(self, topic) -> Optional[dict]:
+        """ Waits for the first response from the TV. """
+        try:
+            return self._queue_volume[topic].get(block=True, timeout=self.timeout)            
         except queue.Empty as e:
             raise HisenseTvTimeoutError(
                 f"failed to recieve a response in {self.timeout:.3f}s"
@@ -250,7 +266,6 @@ class HisenseTv:
     def send_key(self, keyname: str):
         """
         Sends a keypress to the TV, as if it had been pressed on the IR remote.
-
         Args:
             keyname: Name of the key press to send.
         """
@@ -264,24 +279,14 @@ class HisenseTv:
         Args:
             app: Name of the app to launch
         """
-        if app == "amazon":
-            launch = {"name": "Amazon", "urlType": 37, "storeType": 0, "url": "amazon"}
+        if app == "eon":
+            launch = {"url":"https://vewd.global.united.cloud/","name":"EON TV","from":"","storeType":99,"appId":"280"}
 
         elif app == "netflix":
-            launch = {
-                "name": "Netflix",
-                "urlType": 37,
-                "storeType": 0,
-                "url": "netflix",
-            }
+            launch = {"url":"netflix","name":"Netflix","from":"","storeType":98,"appId":"1"}
 
         elif app == "youtube":
-            launch = {
-                "name": "YouTube",
-                "urlType": 37,
-                "storeType": 0,
-                "url": "youtube",
-            }
+            launch = {"url": "youtube","name": "YouTube","from": "","storeType": 98,"appId": "3"}
 
         else:
             raise ValueError(f"{app} is not a known app.")
@@ -414,9 +419,9 @@ class HisenseTv:
         self._launch_app("youtube")
 
     @_check_connected
-    def send_key_amazon(self):
+    def send_key_eon(self):
         """ Sends a keypress of the Amazon key to the TV. """
-        self._launch_app("amazon")
+        self._launch_app("eon")
 
     @_check_connected
     def send_key_0(self):
@@ -469,44 +474,29 @@ class HisenseTv:
         self.send_key("KEY_9")
 
     @_check_connected
-    def send_key_source_0(self):
+    def send_key_source_TV(self):
         """ Sets TV to Input 0 """
-        self._change_source("0")
+        self._change_source("TV")
 
     @_check_connected
-    def send_key_source_1(self):
+    def send_key_source_HDMI1(self):
         """ Sets TV to Input 1 """
-        self._change_source("1")
+        self._change_source("HDMI1")
 
     @_check_connected
-    def send_key_source_2(self):
+    def send_key_source_HDMI2(self):
         """ Sets TV to Input 2 """
-        self._change_source("2")
+        self._change_source("HDMI2")
 
     @_check_connected
-    def send_key_source_3(self):
+    def send_key_source_HDMI3(self):
         """ Sets TV to Input 3 """
-        self._change_source("3")
+        self._change_source("HDMI3")
 
     @_check_connected
-    def send_key_source_4(self):
+    def send_key_source_AVS(self):
         """ Sets TV to Input 4 """
-        self._change_source("4")
-
-    @_check_connected
-    def send_key_source_5(self):
-        """ Sets TV to Input 5 """
-        self._change_source("5")
-
-    @_check_connected
-    def send_key_source_6(self):
-        """ Sets TV to Input 6 """
-        self._change_source("6")
-
-    @_check_connected
-    def send_key_source_7(self):
-        """ Sets TV to Input 7 """
-        self._change_source("7")
+        self._change_source("AVS")
 
     @_check_connected
     def get_sources(self) -> Optional[dict]:
@@ -601,7 +591,7 @@ class HisenseTv:
                 {"volume_type": 0, "volume_value": 0}
         """
         self._call_service(service="platform_service", action="getvolume")
-        return self._wait_for_response(topic=self._BROADCAST_TOPIC)
+        return self._wait_for_response_vol(topic=self._BROADCAST_TOPIC_VOLUME)
 
     @_check_connected
     def set_volume(self, volume: int):
