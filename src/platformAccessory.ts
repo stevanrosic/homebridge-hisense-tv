@@ -92,31 +92,36 @@ export class HiSenseTVAccessory {
     callback(null, this.deviceState.isConnected);
   }
 
-  setOn(value: CharacteristicValue, callback: CharacteristicSetCallback) {
-    this.platform.log.debug('Set Characteristic On ->', value);
-
-    if (value === 1) {
-      if (this.deviceState.isConnected) {
-        // The device is already turned on.
-        callback(null);
-        return; 
-      }
-      wol.wake(this.accessory.context.device.macaddress, (err, res) => {
-        this.platform.log.debug('Sent magic packet, response: ' + res + 'error: ' + err);
-        callback(err);
-      });
-    } else {
-      if (!this.deviceState.isConnected) {
-        // The device is already turned off.
-        callback(null);
-        return; 
-      }
-      this.sendCommand(['--key', 'power'], (err) => {
-        this.platform.log.debug('Sent power off, error: ' + err);
-        callback(err);
-      });
+    setOn(value, callback) {
+        this.platform.log.debug('Set Characteristic On ->', value);
+        if (value === 1) {
+            if (this.deviceState.isConnected) {
+                // The device is already turned on.
+                callback(null);
+                return;
+            }
+            wol_1.default.wake(this.accessory.context.device.macaddress, (err, res) => {
+                this.platform.log.debug('Sent magic packet, response: ' + res + 'error: ' + err);
+            });
+            if (this.fakesleep === 2){
+	            this.sendCommand(['--key', 'power'], (err) => {
+	                this.platform.log.debug('Sent power on, error: ' + err);
+	                callback(err);
+            	});
+            }
+        }
+        else {
+            if (!this.deviceState.isConnected) {
+                // The device is already turned off.
+                callback(null);
+                return;
+            }
+            this.sendCommand(['--key', 'power'], (err) => {
+                this.platform.log.debug('Sent power off, error: ' + err);
+                callback(err);
+            });
+        }
     }
-  }
 
   setRemoteKey(newValue: CharacteristicValue, callback: CharacteristicSetCallback) {
     let keyName = '';
@@ -315,37 +320,51 @@ export class HiSenseTVAccessory {
    * After checking the status, if the inputs have not already been fetched, this function will invoke `getSources`.
    * Otherwise, it'll just check for the current visible input, by calling `getCurrentInput`.
    */
-  checkTVStatus() {
-    this.platform.log.debug('Checking state for TV at IP: ' + this.accessory.context.device.ipaddress);
-
-    const socket = net.createConnection({host: this.accessory.context.device.ipaddress, port: 36669, timeout: 500});
-    socket.on('connect', () => {
-      this.platform.log.debug('Connected to TV!');
-      this.deviceState.isConnected = true;
-      this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
-
-      socket.destroy();
-      if (!this.deviceState.hasFetchedInputs) {
-        this.getSources();
-      } else {
-        this.getCurrentInput();
-      }
-    });
-
-    socket.on('timeout', () => {
-      this.platform.log.debug('Connection to TV timed out.');
-      this.deviceState.isConnected = false;
-      this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
-      socket.destroy();
-    });
-
-    socket.on('error', (err) => {
-      this.platform.log.debug('An error occurred while connecting to TV: ' + err);
-      this.deviceState.isConnected = false;
-      this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
-      socket.destroy();
-    });
-  }
+checkTVStatus() {	    
+        this.platform.log.debug('Checking state for TV at IP: ' + this.accessory.context.device.ipaddress);
+        const socket = net_1.default.createConnection({ host: this.accessory.context.device.ipaddress, port: 36669, timeout: 500 });
+        socket.on('connect', () => {
+	        try {	        
+		        this.sendCommand(['--get', 'state'], (err, output) => {
+	                const response = JSON.parse(output.join(''));
+	                this.platform.log.debug('Connected to TV!');
+					if (response.statetype !== 'fake_sleep_0') {
+			            this.platform.log.debug('Not Fake Sleep');
+			            this.deviceState.isConnected = true;    
+			            this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+			            socket.destroy();			           
+			            if (!this.deviceState.hasFetchedInputs) {
+			                this.getSources();
+			            }
+			            else {
+			                this.getCurrentInput();
+			            }
+	            	}else{
+			            this.platform.log.debug('Fake sleep');
+			            this.fakesleep = 2;		            	
+		            	this.deviceState.isConnected = false;
+						this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+						socket.destroy();						
+	            	}
+                });
+            }
+            catch (error) {
+                this.platform.log.error('An error occurred while fetching the current input: ' + error);
+            }           
+        });
+        socket.on('timeout', () => {
+            this.platform.log.debug('Connection to TV timed out.');
+            this.deviceState.isConnected = false;
+            this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+            socket.destroy();
+        });
+        socket.on('error', (err) => {
+            this.platform.log.debug('An error occurred while connecting to TV: ' + err);
+            this.deviceState.isConnected = false;
+            this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+            socket.destroy();
+        });
+    }
 
   /**
    * Get the currently visible input and updates HomeKit.
@@ -357,29 +376,38 @@ export class HiSenseTVAccessory {
    * 
    * Any other state will be matched as the "Other" input.
    */
-  getCurrentInput() {
-    this.platform.log.debug('Checking current input...');
-
-    this.sendCommand(['--get', 'state'], (err, output) => {
-      try {
-        const response: TVState = JSON.parse((output as any[]).join(''));
-        if (response.statetype === 'sourceswitch') {
-          this.deviceState.currentSourceName = response.sourcename;
-          this.platform.log.debug('Current input is: ' + this.deviceState.currentSourceName);
-        } else if (response.statetype === 'livetv') {
-          this.deviceState.currentSourceName = 'TV';
-          this.platform.log.debug('Current input is: ' + this.deviceState.currentSourceName);
-        } else {
-          this.deviceState.currentSourceName = '';
-          this.platform.log.debug('Current input is unsupported.');
-        }
-
-        this.service.updateCharacteristic(this.platform.Characteristic.ActiveIdentifier, this.getCurrentInputIndex());
-      } catch (error) {
-        this.platform.log.error('An error occurred while fetching the current input: ' + error);
-      }
-    });
-  }
+    getCurrentInput() {
+        this.platform.log.debug('Checking current input...');
+        this.sendCommand(['--get', 'state'], (err, output) => {
+            try {
+                const response = JSON.parse(output.join(''));
+                if (response.statetype === 'sourceswitch') {
+	                this.deviceState.isConnected = true;
+	                this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+	                this.deviceState.currentSourceName = response.sourcename;
+                    this.platform.log.debug('Current input is: ' + this.deviceState.currentSourceName);
+                }
+                else if (response.statetype === 'livetv') {
+	                this.deviceState.isConnected = true;
+	                this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+	                this.deviceState.currentSourceName = 'TV';
+                    this.platform.log.debug('Current input is: ' + this.deviceState.currentSourceName);
+                }
+                else if (response.stateype === 'fake_standby_0'){
+	                this.deviceState.isConnected = false;
+	                this.service.updateCharacteristic(this.platform.Characteristic.Active, this.deviceState.isConnected);
+                }
+				else {
+                    this.deviceState.currentSourceName = '';
+                    this.platform.log.debug('Current input is unsupported.');
+                }
+                this.service.updateCharacteristic(this.platform.Characteristic.ActiveIdentifier, this.getCurrentInputIndex());
+            }
+            catch (error) {
+                this.platform.log.error('An error occurred while fetching the current input: ' + error);
+            }
+        });
+    }
 
   /**
    * Get the index of the current input by matching the current input name to the
